@@ -117,6 +117,12 @@ GpuWork::~GpuWork() {
 }
 
 void GpuWork::initialize() {
+    if (!bpf::isAtLeastKernelVersion(4, 19, 0)) {
+        ALOGI("Legacy kernel detected. Disabling GpuWork BPF features.");
+        mInitialized.store(false);
+        return;
+    }
+
     // Workaround b/347947040 by allowing time for statsd / bpf setup.
     std::this_thread::sleep_for(std::chrono::seconds(30));
 
