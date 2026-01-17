@@ -1459,21 +1459,43 @@ BufferReleaseReader::BufferReleaseReader(
 
 status_t BufferReleaseReader::readBlocking(ReleaseCallbackId& outId, sp<Fence>& outFence,
                                            uint32_t& outMaxAcquiredBufferCount, nsecs_t timeout) {
-    std::optional<timespec> timespec;
+    // 1. Convert timeout to milliseconds for the legacy fallback
+    int timeoutMs = -1;
     if (timeout >= 0) {
-        timespec = timespecFromNanos(timeout);
+        // Round up to ensure we don't return TIMED_OUT too early due to precision loss
+        timeoutMs = static_cast<int>((timeout + 999999) / 1000000);
     }
 
     epoll_event event{};
     int eventCount;
+    static bool sUseEpollPwait2 = true;
+
     do {
-        eventCount = epoll_pwait2(mEpollFd.get(), &event, 1 /*maxevents*/,
-                                  timespec ? &(*timespec) : nullptr, nullptr /*sigmask*/);
+        if (sUseEpollPwait2) {
+            std::optional<timespec> ts;
+            if (timeout >= 0) ts = timespecFromNanos(timeout);
+            
+            eventCount = epoll_pwait2(mEpollFd.get(), &event, 1,
+                                      ts ? &(*ts) : nullptr, nullptr);
+            
+            if (eventCount == -1 && errno == ENOSYS) {
+                ALOGW("epoll_pwait2 not supported, falling back to legacy epoll_pwait");
+                sUseEpollPwait2 = false; // Never try again
+            } else {
+                goto process_event;
+            }
+        }
+
+        // 2. Legacy Fallback (Correct syscall for 3.18)
+        // Note: epoll_pwait takes a signal mask, but we pass nullptr like the original code
+        eventCount = epoll_pwait(mEpollFd.get(), &event, 1, timeoutMs, nullptr);
+
+process_event:
+        (void)0; 
     } while (eventCount == -1 && errno == EINTR);
 
     if (eventCount == -1) {
-        ALOGE("epoll_wait error while waiting for buffer release. errno=%d message='%s'", errno,
-              strerror(errno));
+        ALOGE("epoll_wait error. errno=%d message='%s'", errno, strerror(errno));
         return UNKNOWN_ERROR;
     }
 
